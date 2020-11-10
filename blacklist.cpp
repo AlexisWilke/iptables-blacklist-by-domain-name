@@ -2,6 +2,7 @@
 // pcap docs:   https://linux.die.net/man/3/pcap
 
 #include    <boost/algorithm/string/replace.hpp>
+#include    <boost/algorithm/string/trim.hpp>
 
 #include    <algorithm>
 #include    <cstring>
@@ -17,7 +18,7 @@
 #include    <netinet/ip.h>
 #include    <netinet/tcp.h>
 #include    <netinet/udp.h>
-#include    <pcap.h>
+#include    <pcap/pcap.h>
 
 
 
@@ -145,7 +146,7 @@ pcap_filter::pcap_filter()
     while(getline(in, var))
     {
         ++line;
-        std::remove_if(var.begin(), var.end(), my_isspace);
+        boost::trim(var);
         if(var.empty())
         {
             continue;
@@ -156,7 +157,7 @@ pcap_filter::pcap_filter()
         }
         std::string::size_type const pos(var.find('='));
         std::string name(var.substr(0, pos));
-        std::remove_if(name.begin(), name.end(), my_isspace);
+        boost::trim(name);
         if(name.empty())
         {
             std::cerr << "error:" << line << ": variable name can't be empty." << std::endl;
@@ -217,7 +218,10 @@ void pcap_filter::init()
     {
         int const e(errno);
         std::cerr << "error: could not initialize the blacklist ipset." << std::endl;
-        std::cerr << "error: " << strerror(e) << std::endl;
+        if(e != 0)
+        {
+            std::cerr << "error: " << strerror(e) << std::endl;
+        }
         exit(1);
     }
 
@@ -242,9 +246,16 @@ void pcap_filter::init()
         ms = std::stoi(timeout);
     }
 
+    int buffer_size(IP_MAXPACKET); // 64Kb
+    std::string user_size(get_value("buffer_size"));
+    if(!user_size.empty())
+    {
+        buffer_size = std::clamp(std::stoi(user_size), IP_MAXPACKET, 16 * 1024 * 1024);
+    }
+
     f_pcap = pcap_open_live(
               device.c_str()
-            , IP_MAXPACKET
+            , buffer_size
             , promiscuous == "on"
             , ms
             , g_errbuf);
@@ -263,9 +274,9 @@ void pcap_filter::init()
     std::string filter(get_value("filter"));
     if(filter.empty())
     {
-        // TBD: see whether we can limit to just entries with a useful IP
+        // by default we limit to IPv4 UDP/TCP packets
         //
-        filter = "";
+        filter = "ip udp tcp";
     }
     // TODO: support the netmask (last parameter)
     f_program_compiled = pcap_compile(f_pcap, &f_program, filter.c_str(), 1, 0) != -1;
@@ -277,12 +288,27 @@ void pcap_filter::init()
             << std::endl;
         exit(1);
     }
+
+    if(pcap_setfilter(f_pcap, &f_program) == -1)
+    {
+        std::cerr
+            << "error: an error occured setting the pcap filter: "
+            << pcap_geterr(f_pcap)
+            << std::endl;
+        exit(1);
+    }
 }
 
 
 void pcap_filter::run()
 {
-    pcap_loop(f_pcap, 0, &::static_handle_packet, reinterpret_cast<u_char *>(this));
+    if(f_pcap == nullptr)
+    {
+        std::cerr << "error: run() called with f_pcap == nullptr, did youc all init()?" << std::endl;
+        exit(1);
+    }
+
+    pcap_loop(f_pcap, 0, ::static_handle_packet, reinterpret_cast<u_char *>(this));
 }
 
 
@@ -291,7 +317,6 @@ void pcap_filter::handle_packet(pcap_pkthdr const * header, u_char const * packe
     ether_header const * ether(reinterpret_cast<ether_header const *>(packet));
     if(ntohs(ether->ether_type) != ETHERTYPE_IP)
     {
-std::cerr << "unexpected type (not IP)\n";
         return;
     }
 
@@ -301,19 +326,43 @@ std::cerr << "unexpected type (not IP)\n";
     std::size_t const ip_size(ip_info->ip_hl << 2);
     if(ip_size < (sizeof(ip)))
     {
-std::cerr << "invalid size?! " << ip_info->ip_hl << " vs " << (sizeof(ip) >> 2) << "\n";
         return;
     }
 
     if(ip_info->ip_p == IPPROTO_UDP)
     {
-        udphdr const * udp_info(reinterpret_cast<udphdr const *>(packet + ip_size));
-        handle_ipv4(ip_info->ip_dst, ntohs(udp_info->uh_dport), NI_DGRAM);
+        udphdr const * udp_info(reinterpret_cast<udphdr const *>(packet + sizeof(ether_header) + ip_size));
+//std::cerr
+//    << "UDP source IP "
+//    << ((ip_info->ip_dst.s_addr) & 255)
+//    << "."
+//    << ((ip_info->ip_dst.s_addr >> 8) & 255)
+//    << "."
+//    << ((ip_info->ip_dst.s_addr >> 16) & 255)
+//    << "."
+//    << (ip_info->ip_dst.s_addr >> 24)
+//    << ":"
+//    << (udp_info->uh_dport >> 24)
+//    << " -> ";
+        handle_ipv4(ip_info->ip_src, ntohs(udp_info->uh_sport), NI_DGRAM);
     }
     else if(ip_info->ip_p == IPPROTO_TCP)
     {
-        tcphdr const * tcp_info(reinterpret_cast<tcphdr const *>(packet + ip_size));
-        handle_ipv4(ip_info->ip_dst, ntohs(tcp_info->th_dport), 0);
+        tcphdr const * tcp_info(reinterpret_cast<tcphdr const *>(packet + sizeof(ether_header) + ip_size));
+//std::cerr
+//    << "TCP source IP "
+//    << ((ip_info->ip_dst.s_addr) & 255)
+//    << "."
+//    << ((ip_info->ip_dst.s_addr >> 8) & 255)
+//    << "."
+//    << ((ip_info->ip_dst.s_addr >> 16) & 255)
+//    << "."
+//    << (ip_info->ip_dst.s_addr >> 24)
+//    << ":"
+//    << (tcp_info->th_dport >> 24)
+//    << " -> ";
+        handle_ipv4(ip_info->ip_src, ntohs(tcp_info->th_sport), 0);
+
     }
     //else -- ignore the rest
 }
@@ -341,6 +390,17 @@ void pcap_filter::handle_ipv4(in_addr const & dst, int port, int flags)
     {
         // it was already worked on, we're done
         //
+//std::cerr
+//    << ((dst.s_addr) & 255)
+//    << "."
+//    << ((dst.s_addr >> 8) & 255)
+//    << "."
+//    << ((dst.s_addr >> 16) & 255)
+//    << "."
+//    << (dst.s_addr >> 24)
+//    << ":"
+//    << port
+//    << " already found\n";
         return;
     }
 
@@ -366,8 +426,33 @@ void pcap_filter::handle_ipv4(in_addr const & dst, int port, int flags)
     if(r != 0)
     {
         // could not determine domain name
+//std::cerr
+//    << ((dst.s_addr) & 255)
+//    << "."
+//    << ((dst.s_addr >> 8) & 255)
+//    << "."
+//    << ((dst.s_addr >> 16) & 255)
+//    << "."
+//    << (dst.s_addr >> 24)
+//    << ":"
+//    << port
+//    << " no domain name\n";
         return;
     }
+std::cerr
+    << "got IP "
+    << ((addr.sin_addr.s_addr) & 255)
+    << "."
+    << ((addr.sin_addr.s_addr >> 8) & 255)
+    << "."
+    << ((addr.sin_addr.s_addr >> 16) & 255)
+    << "."
+    << (addr.sin_addr.s_addr >> 24)
+    << ":"
+    << port
+    << " -> ["
+    << host
+    << "]! \n";
 
     cache->set_host(host);
 
@@ -397,13 +482,15 @@ void pcap_filter::handle_ipv4(in_addr const & dst, int port, int flags)
         if(system(add.c_str()) != 0)
         {
             // it may be that all will fail, but this is not a fatal error
+            // also it comes here when the element already exists
             //
             int const e(errno);
             std::cerr
                 << "warning: \""
                 << add
-                << "\" command failed with: "
-                << strerror(e)
+                << "\" command failed
+                << (e != 0 ? std::string("with: ") + strerror(e) : "")
+                << "."
                 << std::endl;
         }
     }
@@ -435,6 +522,7 @@ int main(int argc, char * argv[])
     }
 
     pcap_filter filter;
+    filter.init();
     filter.run();
 
     return 0;
