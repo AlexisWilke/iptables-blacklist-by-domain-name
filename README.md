@@ -10,6 +10,18 @@ This system uses pcap to dump TCP hits and convert that to domain names.
 Then it checks the domain name against a blacklist. On a match it sends
 the IP to ipset so it gets blocked at least for the next it gets used.
 
+## Reverse Lookup Not Working
+
+Most large corporations do not have a PTR that matches the DNS IP addresses
+returned. For example, youtube.com gives IP address which PTR use things
+such as 1e100.net. All of the google services do that.
+
+This means that this tool is totally useless to block a domain such as
+youtube.com.
+
+On the other hand, some companies don't do that. You'll be able to block
+`facebook.com` and `fbcdn.net` easily.
+
 ## Delays
 
 The pcap library does not always return immediately. We give it 20ms by
