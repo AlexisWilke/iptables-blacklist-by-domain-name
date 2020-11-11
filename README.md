@@ -14,7 +14,8 @@ the IP to ipset so it gets blocked at least for the next it gets used.
 
 Most large corporations do not have a PTR that matches the DNS IP addresses
 returned. For example, youtube.com gives IP address which PTR use things
-such as 1e100.net. All of the google services do that.
+such as 1e100.net. All of the google services do that. Similarly, tiktok.com
+appears with akamaitechnologies.com.
 
 This means that this tool is totally useless to block a domain such as
 youtube.com.
